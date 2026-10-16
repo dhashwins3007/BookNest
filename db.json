@@ -1,0 +1,89 @@
+{
+  "books": [
+    {
+      "id": 1,
+      "title": "The Alchemist",
+      "author": "Paulo Coelho",
+      "category": "Fiction",
+      "year": 1988,
+      "rating": 4.7,
+      "image": "/covers/alchemist.webp",
+      "description": "A journey of dreams, courage and self-discovery.",
+      "available": true
+    },
+    {
+      "id": 2,
+      "title": "Atomic Habits",
+      "author": "James Clear",
+      "category": "Self-Help",
+      "year": 2018,
+      "rating": 4.8,
+      "image": "/covers/atomichabits.webp",
+      "description": "A practical guide to building better habits.",
+      "available": true
+    },
+    {
+      "id": 3,
+      "title": "Clean Code",
+      "author": "Robert C. Martin",
+      "category": "Technology",
+      "year": 2008,
+      "rating": 4.6,
+      "image": "/covers/cleancode.webp",
+      "description": "A guide to writing readable and maintainable software.",
+      "available": true
+    },
+    {
+      "id": 4,
+      "title": "Harry Potter",
+      "author": "J.K. Rowling",
+      "category": "Fantasy",
+      "year": 1997,
+      "rating": 4.9,
+      "image": "/covers/harrypotter.webp",
+      "description": "A magical adventure at Hogwarts.",
+      "available": true
+    },
+    {
+      "id": 5,
+      "title": "Psychology of Money",
+      "author": "Morgan Housel",
+      "category": "Finance",
+      "year": 2020,
+      "rating": 4.7,
+      "image": "/covers/psychology.webp",
+      "description": "Lessons about money, behavior and financial decisions.",
+      "available": true
+    },
+    {
+      "id": 6,
+      "title": "Wings of Fire",
+      "author": "A.P.J. Abdul Kalam",
+      "category": "Biography",
+      "year": 1999,
+      "rating": 4.8,
+      "image": "/covers/wingsoffire.webp",
+      "description": "The inspiring autobiography of Dr. A.P.J. Abdul Kalam.",
+      "available": true
+    }
+  ],
+  "members": [
+    {
+      "id": "LIB101",
+      "name": "Library Member",
+      "email": "member@booknest.com",
+      "phone": "9876543210"
+    },
+    {
+      "id": "LIB1792080237180",
+      "name": "Dhashwin S",
+      "email": "dhashwins3007@gmail.com",
+      "phone": "8807800875",
+      "passwordSalt": "bfc4b26d29d548e2f65f31f3c2ffa720",
+      "passwordHash": "3a72ccd40fc0d1162b36a04ebaabb365ecb89bbff68552d0fca957635c44d68a015a3662fce6eca420216e69f1533fbe998cbee2c7207835430b40bbfdea829e"
+    }
+  ],
+  "borrowings": [],
+  "history": [],
+  "holds": []
+}
