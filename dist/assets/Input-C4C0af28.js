@@ -1,0 +1,1 @@
+import{a as e,n as t,t as n}from"./jsx-runtime-OQpaS_Dv.js";var r=e(t(),1),i=n();function a({label:e,id:t,...n}){let a=(0,r.useId)(),o=t||a;return(0,i.jsxs)(`div`,{className:`input-group`,children:[e&&(0,i.jsx)(`label`,{htmlFor:o,children:e}),(0,i.jsx)(`input`,{id:o,...n})]})}export{a as t};

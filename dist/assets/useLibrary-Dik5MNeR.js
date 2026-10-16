@@ -1,0 +1,1 @@
+import{a as e,n as t}from"./jsx-runtime-OQpaS_Dv.js";import{t as n}from"./index-TAOun_20.js";var r=e(t(),1);function i(){let e=(0,r.useContext)(n);if(e===null)throw Error(`useLibrary must be used inside LibraryProvider`);return e}export{i as t};

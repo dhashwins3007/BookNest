@@ -1,0 +1,1 @@
+function e(e){return typeof e!=`string`||!/^\/covers\/[a-zA-Z0-9._-]+$/.test(e)?``:e}export{e as t};
