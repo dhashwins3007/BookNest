@@ -1,383 +1,845 @@
 import http from "node:http";
 import { readFile, writeFile } from "node:fs/promises";
-import { randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
-const path = new URL(process.env.BOOKNEST_DB || "./db.json", import.meta.url);
-const db = JSON.parse(await readFile(path, "utf8"));
-// Session tokens are opaque, expire in 30 minutes, and are checked by the API.
+import {
+  randomBytes,
+  scryptSync,
+  timingSafeEqual
+} from "node:crypto";
+
+// ---------- Database ----------
+
+const databasePath = new URL(
+  process.env.BOOKNEST_DB || "./db.json",
+  import.meta.url
+);
+
+const db = JSON.parse(
+  await readFile(databasePath, "utf8")
+);
+
 const sessions = new Map();
-const salt = "booknest-local-lab";
-const passwordHash = scryptSync("Library@123", salt, 64);
-const publicMember = (m) => {
-  const { passwordHash, passwordSalt, ...safe } = m;
-  return safe;
-};
+
+const demoSalt = "booknest-local-lab";
+const demoPasswordHash = scryptSync(
+  "Library@123",
+  demoSalt,
+  64
+);
+
 let writes = Promise.resolve();
-const save = () => {
-  writes = writes.then(() => writeFile(path, JSON.stringify(db, null, 2)));
+
+function save() {
+  // Keep the write queue usable after an earlier write failure.
+  writes = writes
+    .catch(() => {})
+    .then(() =>
+      writeFile(
+        databasePath,
+        JSON.stringify(db, null, 2)
+      )
+    );
+
   return writes;
-};
-const fail = (status, message) => {
+}
+
+function fail(status, message) {
   throw Object.assign(new Error(message), { status });
-};
-const date = (days) =>
-  new Date(Date.now() + days * 86400000).toISOString().slice(0, 10);
+}
+
+function date(days = 0) {
+  return new Date(Date.now() + days * 86400000)
+    .toISOString()
+    .slice(0, 10);
+}
+
+function publicMember(member) {
+  return {
+    id: member.id,
+    name: member.name,
+    email: member.email,
+    phone: member.phone || ""
+  };
+}
+
 function snapshot(member) {
   return {
     books: db.books,
-    member: member ? publicMember(member) : null,
+    member: publicMember(member),
+
     borrowedBooks: db.borrowings.filter(
-      (x) => x.memberId === member?.id && x.status !== "Returned",
+      item =>
+        item.memberId === member.id &&
+        item.status !== "Returned"
     ),
-    readingHistory: db.history.filter((x) => x.memberId === member?.id),
-    holdRequests: db.holds.filter((x) => x.memberId === member?.id),
+
+    readingHistory: db.history.filter(
+      item => item.memberId === member.id
+    ),
+
+    holdRequests: db.holds.filter(
+      item => item.memberId === member.id
+    )
   };
 }
+
+// ---------- Validation ----------
+
+function validateBody(body) {
+  if (
+    !body ||
+    typeof body !== "object" ||
+    Array.isArray(body)
+  ) {
+    fail(400, "Expected a JSON object.");
+  }
+
+  const fields = [
+    "name",
+    "email",
+    "phone",
+    "password",
+    "username",
+    "title",
+    "author",
+    "category",
+    "description",
+    "reason"
+  ];
+
+  for (const field of fields) {
+    const limit =
+      field === "description"
+        ? 4000
+        : field === "password"
+          ? 128
+          : 500;
+
+    if (
+      field in body &&
+      (
+        typeof body[field] !== "string" ||
+        body[field].length > limit
+      )
+    ) {
+      fail(400, `Invalid ${field}.`);
+    }
+  }
+}
+
+function validateProfile(body) {
+  if (
+    !body.name?.trim() ||
+    !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(body.email || "") ||
+    !/^\d{10}$/.test(body.phone || "")
+  ) {
+    fail(
+      400,
+      "Enter a name, valid email and 10 digit phone number."
+    );
+  }
+}
+
+function validateBook(body) {
+  const year = Number(body.year);
+
+  if (
+    !body.title?.trim() ||
+    !body.author?.trim() ||
+    !body.category?.trim() ||
+    !Number.isInteger(year) ||
+    year < 1000 ||
+    year > new Date().getFullYear()
+  ) {
+    fail(
+      400,
+      "Title, author, category and valid published year are required."
+    );
+  }
+
+  return {
+    title: body.title.trim(),
+    author: body.author.trim(),
+    category: body.category.trim(),
+    year,
+    description: body.description || ""
+  };
+}
+
+// ---------- CORS ----------
+
+const allowedOrigins = new Set(
+  (process.env.ALLOWED_ORIGINS || "")
+    .split(",")
+    .map(value => value.trim())
+    .filter(Boolean)
+);
+
+// ---------- Server ----------
+
 let queue = Promise.resolve();
+
 const server = http.createServer((req, res) => {
+  const origin = req.headers.origin;
+  const allowed = origin && allowedOrigins.has(origin);
+
+  res.setHeader("Vary", "Origin");
+
+  if (allowed) {
+    res.setHeader(
+      "Access-Control-Allow-Origin",
+      origin
+    );
+
+    res.setHeader(
+      "Access-Control-Allow-Methods",
+      "GET, POST, PATCH, PUT, DELETE, OPTIONS"
+    );
+
+    res.setHeader(
+      "Access-Control-Allow-Headers",
+      "Content-Type, Authorization"
+    );
+  }
+
+  const send = (status, data) => {
+    res.writeHead(status, {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff"
+    });
+
+    res.end(JSON.stringify(data));
+  };
+
+  if (req.method === "OPTIONS") {
+    res.writeHead(allowed ? 204 : 403);
+    res.end();
+    return;
+  }
+
+  // Public endpoint for Render health checks.
+  if (
+    req.method === "GET" &&
+    ["/", "/health", "/api/health"].includes(req.url)
+  ) {
+    send(200, {
+      status: "ok",
+      service: "BookNest API"
+    });
+    return;
+  }
+
+  // Serialize database operations.
   queue = queue
     .then(async () => {
-      const send = (status, data) => {
-        res.writeHead(status, {
-          "Content-Type": "application/json",
-          "Cache-Control": "no-store",
-          "X-Content-Type-Options": "nosniff",
-        });
-        res.end(JSON.stringify(data));
-      };
       try {
-        const url = new URL(req.url, "http://localhost");
-        const route = url.pathname.replace(/^\/api/, "");
+        const url = new URL(
+          req.url,
+          "http://localhost"
+        );
+
+        if (!url.pathname.startsWith("/api/")) {
+          fail(404, "API endpoint not found.");
+        }
+
+        const route = url.pathname.slice(4);
+
         let raw = "";
+
         for await (const chunk of req) {
           raw += chunk;
-          if (raw.length > 100000) fail(413, "Request too large");
+
+          if (Buffer.byteLength(raw) > 100000) {
+            fail(413, "Request too large.");
+          }
         }
+
         let body = {};
+
         try {
           body = raw ? JSON.parse(raw) : {};
         } catch {
-          fail(400, "Invalid JSON");
+          fail(400, "Invalid JSON.");
         }
-        if (!body || Array.isArray(body) || typeof body !== "object")
-          fail(400, "Expected a JSON object");
-        for (const field of [
-          "name",
-          "email",
-          "phone",
-          "password",
-          "username",
-          "title",
-          "author",
-          "category",
-          "description",
-          "reason",
-        ]) {
-          if (
-            field in body &&
-            (typeof body[field] !== "string" ||
-              body[field].length >
-                (field === "description"
-                  ? 4000
-                  : field === "password"
-                    ? 128
-                    : 500))
-          )
-            fail(400, "Invalid " + field);
-        }
-        const token = req.headers.authorization?.replace(/^Bearer /, "");
+
+        validateBody(body);
+
+        const token = req.headers.authorization
+          ?.replace(/^Bearer /, "");
+
         const session = sessions.get(token);
+
+        if (session && session.expires <= Date.now()) {
+          sessions.delete(token);
+        }
+
         const member =
           session && session.expires > Date.now()
-            ? db.members.find((m) => m.id === session.memberId)
+            ? db.members.find(
+                item => item.id === session.memberId
+              )
             : null;
+
         const protect = () => {
-          if (!member)
-            fail(401, "Session expired or invalid. Please log in again.");
+          if (!member) {
+            fail(
+              401,
+              "Session expired or invalid. Please log in again."
+            );
+          }
         };
-        if (route === "/auth/signup" && req.method === "POST") {
+
+        // ---------- Register ----------
+
+        if (
+          route === "/auth/signup" &&
+          req.method === "POST"
+        ) {
+          validateProfile(body);
+
           if (
-            !body.name?.trim() ||
-            !/^\S+@\S+\.\S+$/.test(body.email || "") ||
-            !/^\d{10}$/.test(body.phone || "") ||
-            !/(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,}/.test(body.password || "")
-          )
+            !/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d).{8,128}$/
+              .test(body.password || "")
+          ) {
             fail(
               400,
-              "Name, valid email, 10 digit phone and an 8+ character password with upper/lower case and a number are required",
+              "Password must have 8+ characters, uppercase, lowercase and a number."
             );
+          }
+
+          const email = body.email
+            .trim()
+            .toLowerCase();
+
           if (
             db.members.some(
-              (m) => m.email.toLowerCase() === body.email.toLowerCase(),
+              item => item.email.toLowerCase() === email
             )
-          )
-            fail(409, "An account with this email already exists");
-          const passwordSalt = randomBytes(16).toString("hex");
+          ) {
+            fail(
+              409,
+              "An account with this email already exists."
+            );
+          }
+
+          const passwordSalt = randomBytes(16)
+            .toString("hex");
+
           const created = {
-            id: "LIB" + Date.now(),
+            id:
+              "LIB" +
+              Date.now() +
+              randomBytes(3).toString("hex"),
             name: body.name.trim(),
-            email: body.email.trim().toLowerCase(),
+            email,
             phone: body.phone,
             passwordSalt,
-            passwordHash: scryptSync(body.password, passwordSalt, 64).toString(
-              "hex",
-            ),
+            passwordHash: scryptSync(
+              body.password,
+              passwordSalt,
+              64
+            ).toString("hex")
           };
+
           db.members.push(created);
           await save();
-          return send(201, publicMember(created));
+
+          send(201, publicMember(created));
+          return;
         }
-        if (route === "/auth/login" && req.method === "POST") {
+
+        // ---------- Login ----------
+
+        if (
+          route === "/auth/login" &&
+          req.method === "POST"
+        ) {
+          const username = (body.username || "")
+            .trim()
+            .toLowerCase();
+
           const found = db.members.find(
-            (m) =>
-              m.id.toLowerCase() === String(body.username).toLowerCase() ||
-              m.email.toLowerCase() === String(body.username).toLowerCase(),
+            item =>
+              item.id.toLowerCase() === username ||
+              item.email.toLowerCase() === username
           );
-          if (
-            !found ||
-            !timingSafeEqual(
-              found.passwordHash
-                ? Buffer.from(found.passwordHash, "hex")
-                : passwordHash,
-              scryptSync(
-                String(body.password || ""),
-                found.passwordSalt || salt,
-                64,
-              ),
-            )
-          )
-            fail(401, "Invalid member ID/email or password");
-          const accessToken = randomBytes(32).toString("hex");
-          const expiresAt = Date.now() + 1800000;
-          sessions.set(accessToken, { memberId: found.id, expires: expiresAt });
-          return send(200, {
+
+          let validPassword = false;
+
+          if (found) {
+            if (found.passwordHash && found.passwordSalt) {
+              const storedHash = Buffer.from(
+                found.passwordHash,
+                "hex"
+              );
+
+              const suppliedHash = scryptSync(
+                body.password || "",
+                found.passwordSalt,
+                64
+              );
+
+              validPassword =
+                storedHash.length === suppliedHash.length &&
+                timingSafeEqual(storedHash, suppliedHash);
+            } else if (found.id === "LIB101") {
+              validPassword = timingSafeEqual(
+                demoPasswordHash,
+                scryptSync(
+                  body.password || "",
+                  demoSalt,
+                  64
+                )
+              );
+            }
+          }
+
+          if (!found || !validPassword) {
+            fail(
+              401,
+              "Invalid member ID/email or password."
+            );
+          }
+
+          const accessToken = randomBytes(32)
+            .toString("hex");
+
+          const expiresAt =
+            Date.now() + 30 * 60 * 1000;
+
+          sessions.set(accessToken, {
+            memberId: found.id,
+            expires: expiresAt
+          });
+
+          send(200, {
             accessToken,
             expiresAt,
-            member: publicMember(found),
+            member: publicMember(found)
           });
+
+          return;
         }
-        if (route === "/auth/logout") {
+
+        // ---------- Logout ----------
+
+        if (
+          route === "/auth/logout" &&
+          req.method === "POST"
+        ) {
           sessions.delete(token);
-          return send(200, { ok: true });
+          send(200, { ok: true });
+          return;
         }
+
+        // All following API routes require authentication.
         protect();
-        if (route === "/state") {
-          protect();
-          return send(200, snapshot(member));
+
+        // ---------- Shared State ----------
+
+        if (
+          route === "/state" &&
+          req.method === "GET"
+        ) {
+          send(200, snapshot(member));
+          return;
         }
-        if (route === "/members") {
-          protect();
-          return send(200, db.members.map(publicMember));
+
+        // ---------- Members ----------
+
+        if (
+          route === "/members" &&
+          req.method === "GET"
+        ) {
+          send(200, db.members.map(publicMember));
+          return;
         }
+
+        // ---------- Profile ----------
+
         if (route === "/profile") {
-          protect();
           if (req.method === "PATCH") {
-            if (
-              !body.name?.trim() ||
-              !/^\S+@\S+\.\S+$/.test(body.email || "") ||
-              !/^\d{10}$/.test(body.phone || "")
-            )
-              fail(400, "Enter a name, valid email and 10 digit phone number");
+            validateProfile(body);
+
+            const email = body.email
+              .trim()
+              .toLowerCase();
+
             if (
               db.members.some(
-                (m) =>
-                  m.id !== member.id &&
-                  m.email.toLowerCase() === body.email.toLowerCase(),
+                item =>
+                  item.id !== member.id &&
+                  item.email.toLowerCase() === email
               )
-            )
-              fail(409, "Email already in use");
+            ) {
+              fail(409, "Email already in use.");
+            }
+
             Object.assign(member, {
               name: body.name.trim(),
-              email: body.email.trim(),
-              phone: body.phone,
+              email,
+              phone: body.phone
             });
+
             await save();
+          } else if (req.method !== "GET") {
+            fail(405, "Method not allowed.");
           }
-          return send(200, publicMember(member));
+
+          send(200, publicMember(member));
+          return;
         }
-        if (route === "/history" || route === "/borrowings") {
-          protect();
-          return send(
+
+        // ---------- History and Borrowings ----------
+
+        if (
+          req.method === "GET" &&
+          (
+            route === "/history" ||
+            route === "/borrowings"
+          )
+        ) {
+          const state = snapshot(member);
+
+          send(
             200,
             route === "/history"
-              ? snapshot(member).readingHistory
-              : snapshot(member).borrowedBooks,
+              ? state.readingHistory
+              : state.borrowedBooks
           );
+
+          return;
         }
-        if (route === "/recommendations") {
-          const category = url.searchParams.get("category");
-          return send(
-            200,
-            db.books
-              .filter(
-                (b) =>
-                  b.available &&
-                  (!category || category === "All" || b.category === category),
+
+        // ---------- Recommendations ----------
+
+        if (
+          route === "/recommendations" &&
+          req.method === "GET"
+        ) {
+          const category = url.searchParams
+            .get("category");
+
+          const recommendations = db.books
+            .filter(
+              book =>
+                book.available &&
+                (
+                  !category ||
+                  category === "All" ||
+                  book.category === category
+                )
+            )
+            .slice(0, 6);
+
+          send(200, recommendations);
+          return;
+        }
+
+        // ---------- Book List ----------
+
+        if (
+          route === "/books" &&
+          req.method === "GET"
+        ) {
+          const query = (
+            url.searchParams.get("q") || ""
+          ).toLowerCase();
+
+          const category = url.searchParams
+            .get("category");
+
+          const books = db.books.filter(
+            book =>
+              (book.title + " " + book.author)
+                .toLowerCase()
+                .includes(query) &&
+              (
+                !category ||
+                category === "All" ||
+                book.category === category
               )
-              .slice(0, 6),
           );
+
+          send(200, books);
+          return;
         }
-        if (route === "/books" && req.method === "GET") {
-          const q = (url.searchParams.get("q") || "").toLowerCase(),
-            c = url.searchParams.get("category");
-          return send(
-            200,
-            db.books.filter(
-              (b) =>
-                (b.title + " " + b.author).toLowerCase().includes(q) &&
-                (!c || c === "All" || b.category === c),
-            ),
-          );
-        }
-        const match = route.match(/^\/books\/(\d+)$/);
+
+        // ---------- Book CRUD ----------
+
+        const match = route.match(
+          /^\/books\/(\d+)$/
+        );
+
         if (route === "/books" || match) {
           const book = match
-            ? db.books.find((b) => b.id === Number(match[1]))
+            ? db.books.find(
+                item => item.id === Number(match[1])
+              )
             : null;
-          if (match && !book) fail(404, "Book not found");
-          if (req.method === "GET") return send(200, book);
-          protect();
-          if (req.method === "DELETE") {
-            if (!book.available || db.holds.some((h) => h.id === book.id))
-              fail(409, "Return this book and resolve holds before deleting");
-            db.books = db.books.filter((b) => b.id !== book.id);
-            await save();
-            return send(200, { ok: true });
+
+          if (match && !book) {
+            fail(404, "Book not found.");
           }
+
+          if (req.method === "GET" && book) {
+            send(200, book);
+            return;
+          }
+
           if (
-            !body.title?.trim() ||
-            !body.author?.trim() ||
-            !body.category?.trim() ||
-            !Number.isInteger(Number(body.year)) ||
-            Number(body.year) < 1000 ||
-            Number(body.year) > new Date().getFullYear()
-          )
-            fail(
-              400,
-              "Title, author, category and valid published year are required",
-            );
-          const fields = {
-            title: body.title.trim(),
-            author: body.author.trim(),
-            category: body.category.trim(),
-            year: Number(body.year),
-            description: body.description || "",
-          };
-          if (req.method === "POST" && !match) {
-            const next = {
+            req.method === "POST" &&
+            route === "/books"
+          ) {
+            const fields = validateBook(body);
+
+            const created = {
               ...fields,
-              id: Math.max(0, ...db.books.map((b) => b.id)) + 1,
+              id:
+                Math.max(
+                  0,
+                  ...db.books.map(item => item.id)
+                ) + 1,
               available: true,
               rating: 0,
-              image: "",
+              image: ""
             };
-            db.books.push(next);
+
+            db.books.push(created);
             await save();
-            return send(201, next);
+
+            send(201, created);
+            return;
           }
-          if (["PATCH", "PUT"].includes(req.method) && book) {
-            Object.assign(book, fields);
+
+          if (
+            book &&
+            ["PATCH", "PUT"].includes(req.method)
+          ) {
+            Object.assign(
+              book,
+              validateBook(body)
+            );
+
             await save();
-            return send(200, book);
+            send(200, book);
+            return;
           }
-          fail(405, "Method not allowed");
-        }
-        if (route === "/operations" && req.method === "POST") {
-          protect();
-          const book = db.books.find((b) => b.id === Number(body.id));
-          if (!book) fail(404, "Book not found");
-          const loan = db.borrowings.find(
-            (x) =>
-              x.id === book.id &&
-              x.memberId === member.id &&
-              x.status !== "Returned",
-          );
-          let action = "";
-          if (body.action === "borrow") {
-            if (!book.available)
-              fail(409, "Book currently unavailable. Place a hold instead.");
-            if (!body.name?.trim() || !/^\d{10}$/.test(body.phone || ""))
-              fail(400, "Member name and 10 digit phone number are required");
-            const firstHold = db.holds.find((h) => h.id === book.id);
-            if (firstHold && firstHold.memberId !== member.id)
+
+          if (book && req.method === "DELETE") {
+            if (
+              !book.available ||
+              db.holds.some(
+                item => item.id === book.id
+              )
+            ) {
               fail(
                 409,
-                "This copy is reserved for the first member in the hold queue",
+                "Return this book and resolve holds before deleting."
               );
+            }
+
+            db.books = db.books.filter(
+              item => item.id !== book.id
+            );
+
+            await save();
+            send(200, { ok: true });
+            return;
+          }
+
+          fail(405, "Method not allowed.");
+        }
+
+        // ---------- Borrowing Operations ----------
+
+        if (
+          route === "/operations" &&
+          req.method === "POST"
+        ) {
+          const book = db.books.find(
+            item => item.id === Number(body.id)
+          );
+
+          if (!book) {
+            fail(404, "Book not found.");
+          }
+
+          const loan = db.borrowings.find(
+            item =>
+              item.id === book.id &&
+              item.memberId === member.id &&
+              item.status !== "Returned"
+          );
+
+          let action = "";
+
+          if (body.action === "borrow") {
+            if (!book.available) {
+              fail(
+                409,
+                "Book currently unavailable. Place a hold instead."
+              );
+            }
+
+            if (
+              !body.name?.trim() ||
+              !/^\d{10}$/.test(body.phone || "")
+            ) {
+              fail(
+                400,
+                "Member name and 10 digit phone number are required."
+              );
+            }
+
+            const firstHold = db.holds.find(
+              item => item.id === book.id
+            );
+
+            if (
+              firstHold &&
+              firstHold.memberId !== member.id
+            ) {
+              fail(
+                409,
+                "This copy is reserved for the first member in the hold queue."
+              );
+            }
+
             book.available = false;
+
             db.borrowings.push({
               ...book,
               memberId: member.id,
               dueDate: date(14),
               status: "Borrowed",
-              renewals: 0,
+              renewals: 0
             });
+
             db.holds = db.holds.filter(
-              (h) => !(h.id === book.id && h.memberId === member.id),
+              item =>
+                !(
+                  item.id === book.id &&
+                  item.memberId === member.id
+                )
             );
+
             action = "Borrowed";
           } else if (body.action === "hold") {
-            if (book.available || loan)
+            if (book.available || loan) {
               fail(
                 409,
-                "Holds are only for unavailable books borrowed by another member",
+                "Holds are only for unavailable books borrowed by another member."
               );
+            }
+
             if (
-              db.holds.some((h) => h.id === book.id && h.memberId === member.id)
-            )
-              fail(409, "Hold already requested");
+              db.holds.some(
+                item =>
+                  item.id === book.id &&
+                  item.memberId === member.id
+              )
+            ) {
+              fail(409, "Hold already requested.");
+            }
+
             db.holds.push({
               ...book,
               memberId: member.id,
-              date: date(0),
-              status: "Hold Requested",
+              date: date(),
+              status: "Hold Requested"
             });
+
             action = "Placed on hold";
           } else if (body.action === "return") {
-            if (!loan) fail(404, "Borrowing record not found");
+            if (!loan) {
+              fail(404, "Borrowing record not found.");
+            }
+
             loan.status = "Returned";
             book.available = true;
             action = "Returned";
           } else if (body.action === "renew") {
-            if (!loan) fail(404, "Borrowing record not found");
+            if (!loan) {
+              fail(404, "Borrowing record not found.");
+            }
+
             if (
               loan.renewals >= 2 ||
-              loan.dueDate < date(0) ||
-              db.holds.some((h) => h.id === book.id)
-            )
+              loan.dueDate < date() ||
+              db.holds.some(
+                item => item.id === book.id
+              )
+            ) {
               fail(
                 409,
-                "Book renewal is not available (overdue, held, or renewal limit reached)",
+                "Book renewal is not available: overdue, held or renewal limit reached."
               );
-            if (!body.reason?.trim()) fail(400, "Renewal reason is required");
-            loan.dueDate = new Date(Date.parse(loan.dueDate) + 7 * 86400000)
+            }
+
+            if (!body.reason?.trim()) {
+              fail(400, "Renewal reason is required.");
+            }
+
+            loan.dueDate = new Date(
+              Date.parse(loan.dueDate) +
+              7 * 86400000
+            )
               .toISOString()
               .slice(0, 10);
+
             loan.renewals++;
             loan.status = "Renewed";
             action = "Renewed";
-          } else fail(400, "Unknown operation");
+          } else {
+            fail(400, "Unknown operation.");
+          }
+
           db.history.push({
             id: book.id,
             title: book.title,
             author: book.author,
             memberId: member.id,
             action,
-            date: date(0),
+            date: date()
           });
+
           await save();
-          return send(200, snapshot(member));
+
+          send(200, snapshot(member));
+          return;
         }
-        fail(404, "API endpoint not found");
-      } catch (e) {
-        send(e.status || 500, {
-          message: e.status ? e.message : "Server could not save the request",
+
+        fail(404, "API endpoint not found.");
+      } catch (error) {
+        send(error.status || 500, {
+          message: error.status
+            ? error.message
+            : "Server could not process the request."
         });
       }
     })
-    .catch(console.error);
+    .catch(error => {
+      console.error("Request processing failed:", error.message);
+
+      if (!res.writableEnded) {
+        if (!res.headersSent) {
+          send(500, {
+            message: "Server error."
+          });
+        } else {
+          res.end();
+        }
+      }
+    });
 });
-server.listen(Number(process.env.PORT || 3001), "127.0.0.1", () => {
+
+// ---------- Start ----------
+
+const port = Number(process.env.PORT || 3001);
+
+server.listen(port, "0.0.0.0", () => {
   console.log(
-    `BookNest API ready at http://127.0.0.1:${server.address().port}`,
+    `BookNest API running on port ${server.address().port}`
   );
 });
